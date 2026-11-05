@@ -266,9 +266,9 @@ def process_agent_response(user_text: str) -> str:
     messages.extend(memory.messages())
     messages.append({"role": "user", "content": user_text})
 
-    tools_handler = IntermediateTools()
+       tools_handler = IntermediateTools()
 
-        for _ in range(6):  # máximo de rondas de herramientas
+    for _ in range(6):  # máximo de rondas de herramientas
         try:
             resp = llamar_modelo(messages)
         except BadRequestError:
