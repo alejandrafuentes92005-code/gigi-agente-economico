@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -9,19 +10,15 @@ import streamlit as st
 from basic_memory import BasicMemory
 from intermediate_tools import IntermediateTools
 
-# =========================
-# CONFIGURACIÓN INICIAL
-# =========================
-load_dotenv()
-
-MEMORY_MAX_MESSAGES = 10
-api_key = os.environ.get("GROQ_API_KEY")
-client = Groq(api_key=api_key)
-
-now = datetime.now(ZoneInfo("America/Guatemala"))
+try:
+    from supabase import create_client
+    SUPABASE_DISPONIBLE = True
+except ImportError:
+    create_client = None
+    SUPABASE_DISPONIBLE = False
 
 # =========================
-# CONFIGURACIÓN STREAMLIT
+# CONFIGURACIÓN STREAMLIT (debe ir primero)
 # =========================
 NOME_AGENTE = "Gigi"
 
@@ -30,6 +27,91 @@ st.set_page_config(
     page_icon="🐧",
     layout="wide"
 )
+
+# =========================
+# CONFIGURACIÓN INICIAL
+# =========================
+load_dotenv()
+
+
+def obtener_secreto(nombre, default=""):
+    """Lee primero Streamlit Secrets y, si no existe, una variable de entorno (.env)."""
+    try:
+        valor = st.secrets.get(nombre, None)
+        if valor:
+            return str(valor).strip()
+    except Exception:
+        pass
+    return (os.getenv(nombre) or default).strip()
+
+
+MEMORY_MAX_MESSAGES = 10
+TABLA_CONVERSACIONES = "conversaciones_gigi"
+
+client = Groq(api_key=obtener_secreto("GROQ_API_KEY"))
+
+now = datetime.now(ZoneInfo("America/Guatemala"))
+
+# =========================
+# SUPABASE
+# =========================
+@st.cache_resource
+def _crear_cliente_supabase(url, key):
+    # Si lanza excepción, Streamlit NO cachea el fallo y reintenta después.
+    return create_client(url, key)
+
+
+def init_supabase():
+    """Devuelve (cliente, error). Nunca imprime la clave."""
+    if not SUPABASE_DISPONIBLE:
+        return None, "Falta instalar el paquete 'supabase' en requirements.txt."
+
+    url = obtener_secreto("SUPABASE_URL").strip('"').strip("'").rstrip("/")
+    for sufijo in ("/rest/v1", "/rest"):
+        if url.endswith(sufijo):
+            url = url[: -len(sufijo)].rstrip("/")
+    key = obtener_secreto("SUPABASE_KEY").strip('"').strip("'")
+
+    if not url or not key:
+        return None, "Faltan SUPABASE_URL o SUPABASE_KEY."
+
+    try:
+        return _crear_cliente_supabase(url, key), None
+    except Exception as e:
+        return None, f"No se pudo crear el cliente: {e}"
+
+
+supabase, error_supabase = init_supabase()
+
+
+def guardar_en_supabase(pregunta, respuesta):
+    if supabase is None:
+        return False, error_supabase or "Supabase no conectado"
+    try:
+        supabase.table(TABLA_CONVERSACIONES).insert({
+            "session_id": st.session_state.get("session_id"),
+            "pregunta": str(pregunta),
+            "respuesta": str(respuesta),
+        }).execute()
+        return True, None
+    except Exception as e:
+        print(f"❌ ERROR SUPABASE: {e}")
+        return False, str(e)
+
+
+# =========================
+# MEMORIA Y SESIÓN
+# =========================
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+if "memory" not in st.session_state:
+    st.session_state.memory = BasicMemory(max_messages=MEMORY_MAX_MESSAGES)
+
+memory = st.session_state.memory
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 # =========================
 # BARRA LATERAL (PANEL IZQUIERDO)
@@ -60,18 +142,14 @@ with st.sidebar:
     if st.button("🗑️ Limpiar Conversación"):
         st.session_state.chat_history = []
         st.session_state.memory = BasicMemory(max_messages=MEMORY_MAX_MESSAGES)
+        st.session_state.session_id = str(uuid.uuid4())
         st.rerun()
 
-# =========================
-# MEMORIA Y SESIÓN
-# =========================
-if "memory" not in st.session_state:
-    st.session_state.memory = BasicMemory(max_messages=MEMORY_MAX_MESSAGES)
-
-memory = st.session_state.memory
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.divider()
+    if supabase:
+        st.success("✅ Supabase conectado")
+    else:
+        st.error(f"❌ Supabase no conectado: {error_supabase}")
 
 # =========================
 # SYSTEM PROMPT Y TOOLS
@@ -253,9 +331,9 @@ selected_prompt = None
 # Mostrar pantalla de bienvenida con tarjetas y ejemplos solo si el chat está vacío
 if not st.session_state.chat_history:
     st.markdown("### ¿Qué puedo consultar por ti?")
-    
+
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
         st.info("💱 **Mercados**\n\nTipo de cambio frente al quetzal/USD y precios de criptomonedas.")
     with col2:
@@ -264,7 +342,7 @@ if not st.session_state.chat_history:
         st.info("🗺️ **Países y Comercio**\n\nInformación demográfica y exportaciones/importaciones de Guatemala.")
 
     st.markdown("### Prueba con un ejemplo:")
-    
+
     ex_col1, ex_col2 = st.columns(2)
     with ex_col1:
         if st.button("¿Cuál es el tipo de cambio del USD hoy?"):
@@ -305,12 +383,19 @@ if user_text:
                 assistant_text = process_agent_response(user_text)
                 st.markdown(assistant_text)
 
-        # Guardar en la memoria persistente de la sesión
+        # Guardar en la memoria de la sesión
         memory.add("user", user_text)
         memory.add("assistant", assistant_text)
 
+        # Guardar en Supabase
+        ok, err = guardar_en_supabase(user_text, assistant_text)
+        if ok:
+            st.toast("Conversación guardada", icon="✅")
+        else:
+            st.warning(f"No se pudo guardar en Supabase: {err}")
+
         st.session_state.chat_history.append({"role": "assistant", "content": assistant_text})
-        
+
         # Si vino de un botón rápido, recargamos para actualizar la interfaz
         if selected_prompt:
             st.rerun()
