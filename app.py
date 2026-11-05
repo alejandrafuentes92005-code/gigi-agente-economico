@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, BadRequestError
 import streamlit as st
 
 from basic_memory import BasicMemory
@@ -268,12 +268,11 @@ def process_agent_response(user_text: str) -> str:
 
     tools_handler = IntermediateTools()
 
-    while True:
-        resp = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
-            tools=TOOLS
-        )
+        for _ in range(6):  # máximo de rondas de herramientas
+        try:
+            resp = llamar_modelo(messages)
+        except BadRequestError:
+            return "⚠️ No pude procesar esa consulta. Intenta reformular la pregunta."
 
         msg = resp.choices[0].message
 
