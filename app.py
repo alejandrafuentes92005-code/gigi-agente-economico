@@ -57,7 +57,6 @@ now = datetime.now(ZoneInfo("America/Guatemala"))
 # =========================
 @st.cache_resource
 def _crear_cliente_supabase(url, key):
-    # Si lanza excepción, Streamlit NO cachea el fallo y reintenta después.
     return create_client(url, key)
 
 
@@ -147,7 +146,11 @@ with st.sidebar:
 
     st.divider()
     if supabase:
-        st.success("✅ Supabase conectado")
+        try:
+            supabase.table(TABLA_CONVERSACIONES).select("id").limit(1).execute()
+            st.success("✅ Supabase conectado")
+        except Exception as e:
+            st.error(f"❌ Supabase: clave o tabla inválida ({e})")
     else:
         st.error(f"❌ Supabase no conectado: {error_supabase}")
 
@@ -261,12 +264,27 @@ TOOLS = [
 # =========================
 # LÓGICA DE INTERACCIÓN Y HERRAMIENTAS
 # =========================
+def llamar_modelo(messages, intentos=3):
+    ultimo_error = None
+    for _ in range(intentos):
+        try:
+            return client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=messages,
+                tools=TOOLS,
+                temperature=0.2,
+            )
+        except BadRequestError as e:
+            ultimo_error = e
+    raise ultimo_error
+
+
 def process_agent_response(user_text: str) -> str:
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(memory.messages())
     messages.append({"role": "user", "content": user_text})
 
-       tools_handler = IntermediateTools()
+    tools_handler = IntermediateTools()
 
     for _ in range(6):  # máximo de rondas de herramientas
         try:
@@ -319,15 +337,15 @@ def process_agent_response(user_text: str) -> str:
                 "content": json.dumps(result, ensure_ascii=False)
             })
 
+    return "⚠️ No pude completar la consulta. Intenta de nuevo."
+
 # =========================
 # INTERFAZ PRINCIPAL CON ESTILO DE TARJETAS
 # =========================
 st.title(f"💬 Conversación con {NOME_AGENTE} 🐧")
 
-# Variable para capturar si se hizo clic en un botón rápido
 selected_prompt = None
 
-# Mostrar pantalla de bienvenida con tarjetas y ejemplos solo si el chat está vacío
 if not st.session_state.chat_history:
     st.markdown("### ¿Qué puedo consultar por ti?")
 
@@ -356,13 +374,11 @@ if not st.session_state.chat_history:
 
     st.divider()
 
-# Mostrar historial de chat existente
 for message in st.session_state.chat_history:
     avatar_icon = "🐧" if message["role"] == "assistant" else "👤"
     with st.chat_message(message["role"], avatar=avatar_icon):
         st.markdown(message["content"])
 
-# Entrada de usuario (por chat input o por los botones de ejemplo)
 user_text = st.chat_input("Escribe tu mensaje económico aquí...")
 
 if selected_prompt:
@@ -371,22 +387,18 @@ if selected_prompt:
 if user_text:
     user_text = user_text.strip()
     if user_text:
-        # Mostrar mensaje del usuario
         st.session_state.chat_history.append({"role": "user", "content": user_text})
         with st.chat_message("user", avatar="👤"):
             st.markdown(user_text)
 
-        # Procesar respuesta con Gigi
         with st.chat_message("assistant", avatar="🐧"):
             with st.spinner(f"{NOME_AGENTE} está analizando datos..."):
                 assistant_text = process_agent_response(user_text)
                 st.markdown(assistant_text)
 
-        # Guardar en la memoria de la sesión
         memory.add("user", user_text)
         memory.add("assistant", assistant_text)
 
-        # Guardar en Supabase
         ok, err = guardar_en_supabase(user_text, assistant_text)
         if ok:
             st.toast("Conversación guardada", icon="✅")
@@ -395,6 +407,5 @@ if user_text:
 
         st.session_state.chat_history.append({"role": "assistant", "content": assistant_text})
 
-        # Si vino de un botón rápido, recargamos para actualizar la interfaz
         if selected_prompt:
             st.rerun()
